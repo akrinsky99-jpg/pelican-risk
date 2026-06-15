@@ -35,8 +35,6 @@ app = FastAPI(
     Built for community banks, credit unions, and insurance
     agencies who need fast, accurate business classification
     without enterprise pricing.
-    
-    **Project Pelican** — LSU J. Terrell Venture Challenge 2025
     """,
     version="0.1.0"
 )
