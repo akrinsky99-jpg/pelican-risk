@@ -1,39 +1,41 @@
-# app/main.py — Pelican Risk API
-# Endpoints: classify, batch, correct, confirm, history, audit, portfolio
+from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime
 from sqlalchemy.orm import Session
 import uuid
 
 from app.classifier import classify_business, NAICS_MAPPINGS
+from app.confidence import CONFIRMED_SCORE
 from app.database import (
     get_db, init_db, seed_demo_customer,
     Customer, Classification, Correction, BatchJob
 )
-from app.confidence import CONFIRMED_SCORE
+from app.export import export_excel, export_pdf
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    seed_demo_customer()
+    yield
+
 
 app = FastAPI(
     title="Pelican Risk API",
     description="NAICS classification and portfolio intelligence for Louisiana financial institutions.",
-    version="0.2.0"
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def startup():
-    init_db()
-    seed_demo_customer()
 
 
 # ── AUTH ──────────────────────────────────────────────────────
@@ -49,20 +51,20 @@ def get_customer(x_api_key: str = Header(...), db: Session = Depends(get_db)) ->
 
 class ClassifyRequest(BaseModel):
     business_name: str
-    address: Optional[str] = None
+    address: str | None = None
 
 class BatchRequest(BaseModel):
     businesses: list[ClassifyRequest]
 
 class CorrectRequest(BaseModel):
     corrected_naics_code: str
-    corrected_description: Optional[str] = None
-    corrected_sector: Optional[str] = None
-    correction_reason: Optional[str] = None
-    corrected_by: Optional[str] = "reviewer"
+    corrected_description: str | None = None
+    corrected_sector: str | None = None
+    correction_reason: str | None = None
+    corrected_by: str | None = "reviewer"
 
 class ConfirmRequest(BaseModel):
-    confirmed_by: Optional[str] = "reviewer"
+    confirmed_by: str | None = "reviewer"
 
 
 # ── ENDPOINTS ─────────────────────────────────────────────────
@@ -73,7 +75,7 @@ def root():
         "name": "Pelican Risk API",
         "version": "0.2.0",
         "status": "running",
-        "docs": "/docs"
+        "docs": "/docs",
     }
 
 
@@ -82,7 +84,7 @@ def health():
     return {
         "status": "healthy",
         "classifier_keywords": len(NAICS_MAPPINGS),
-        "version": "0.2.0"
+        "version": "0.2.0",
     }
 
 
@@ -90,9 +92,8 @@ def health():
 def classify(
     req: ClassifyRequest,
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """Classify a single business. Writes result to database."""
     result = classify_business(
         business_name=req.business_name,
         address=req.address,
@@ -108,7 +109,7 @@ def classify(
 def classify_batch(
     req: BatchRequest,
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Classify up to 500 businesses at once. All results stored with a shared batch_id."""
     if len(req.businesses) > 500:
@@ -119,7 +120,7 @@ def classify_batch(
         id=batch_id,
         customer_id=customer.id,
         total_rows=len(req.businesses),
-        status="processing"
+        status="processing",
     )
     db.add(job)
     db.commit()
@@ -146,7 +147,7 @@ def classify_batch(
             results.append({
                 "success": False,
                 "business_name": b.business_name,
-                "error": "Processing error"
+                "error": "Processing error",
             })
 
     job.classified = classified
@@ -171,13 +172,9 @@ def correct_classification(
     classification_id: str,
     req: CorrectRequest,
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    Human correction endpoint.
-    Stores the original and corrected code permanently.
-    Every correction is proprietary training signal.
-    """
+    """Stores the original and corrected code permanently — every correction is training signal."""
     record = db.query(Classification).filter_by(
         id=classification_id, customer_id=customer.id
     ).first()
@@ -214,7 +211,7 @@ def correct_classification(
     return {
         "success": True,
         "classification_id": classification_id,
-        "corrected_to": req.corrected_naics_code
+        "corrected_to": req.corrected_naics_code,
     }
 
 
@@ -223,7 +220,7 @@ def confirm_classification(
     classification_id: str,
     req: ConfirmRequest,
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Human confirms a classification is correct as-is. Locks confidence at 1.0."""
     record = db.query(Classification).filter_by(
@@ -241,26 +238,41 @@ def confirm_classification(
     return {
         "success": True,
         "classification_id": classification_id,
-        "confirmed_by": req.confirmed_by
+        "confirmed_by": req.confirmed_by,
     }
 
 
 @app.get("/history")
 def classification_history(
-    limit: int = 50,
-    needs_review: Optional[bool] = None,
+    limit: int = 100,
+    needs_review: bool | None = None,
+    sector: str | None = None,
+    parish: str | None = None,
+    confidence_tier: str | None = None,
+    confirmed: bool | None = None,
+    search: str | None = None,
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """Classification history for this institution. Filter by needs_review=true to see the review queue."""
-    query = db.query(Classification).filter_by(customer_id=customer.id)
+    """Classification history with filtering by sector, parish, tier, confirmed status, and name search."""
+    query = db.query(Classification).filter(Classification.customer_id == customer.id)
     if needs_review is not None:
-        query = query.filter_by(needs_review=needs_review)
+        query = query.filter(Classification.needs_review == needs_review)
+    if sector:
+        query = query.filter(Classification.naics_sector == sector)
+    if parish:
+        query = query.filter(Classification.parish == parish)
+    if confidence_tier:
+        query = query.filter(Classification.confidence_tier == confidence_tier)
+    if confirmed is not None:
+        query = query.filter(Classification.confirmed == confirmed)
+    if search:
+        query = query.filter(Classification.business_name.ilike(f"%{search}%"))
     records = query.order_by(Classification.created_at.desc()).limit(limit).all()
     return {
         "customer": customer.name,
         "total_returned": len(records),
-        "results": [_serialize(r) for r in records]
+        "results": [_serialize(r) for r in records],
     }
 
 
@@ -268,21 +280,16 @@ def classification_history(
 def audit_trail(
     classification_id: str,
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    Full audit trail for a single classification.
-    This is what you show an examiner.
-    """
+    """Full audit trail for a single classification — what you show an examiner."""
     record = db.query(Classification).filter_by(
         id=classification_id, customer_id=customer.id
     ).first()
     if not record:
         raise HTTPException(status_code=404, detail="Classification not found")
 
-    corrections = db.query(Correction).filter_by(
-        classification_id=classification_id
-    ).all()
+    corrections = db.query(Correction).filter_by(classification_id=classification_id).all()
 
     return {
         "classification": _serialize(record),
@@ -301,30 +308,51 @@ def audit_trail(
             "currently_confirmed": record.confirmed,
             "final_code": record.naics_code,
             "final_confidence": record.confidence_score,
-        }
+        },
     }
+
+
+@app.get("/audit/{classification_id}/export")
+def export_audit(
+    classification_id: str,
+    format: str = "pdf",
+    customer: Customer = Depends(get_customer),
+    db: Session = Depends(get_db),
+):
+    """Export a classification's full audit trail as PDF or Excel."""
+    record = db.query(Classification).filter_by(
+        id=classification_id, customer_id=customer.id
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Classification not found")
+
+    corrections = db.query(Correction).filter_by(
+        classification_id=classification_id
+    ).order_by(Correction.corrected_at).all()
+
+    if format == "excel":
+        return export_excel(record, corrections, customer)
+    elif format == "pdf":
+        return export_pdf(record, corrections, customer)
+    else:
+        raise HTTPException(status_code=400, detail="format must be 'pdf' or 'excel'")
 
 
 @app.get("/portfolio/concentration")
 def portfolio_concentration(
     customer: Customer = Depends(get_customer),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    """
-    Layer 2: Portfolio concentration dashboard.
-    Breakdown of classified businesses by sector.
-    Flags any sector exceeding 20% concentration.
-    This is the Chief Risk Officer view.
-    """
+    """Portfolio concentration by sector. Flags any sector exceeding 20%."""
     records = db.query(Classification).filter(
         Classification.customer_id == customer.id,
-        Classification.naics_code != None
+        Classification.naics_code != None,
     ).all()
 
     if not records:
         return {"customer": customer.name, "total_classified": 0, "sectors": []}
 
-    sector_counts = {}
+    sector_counts: dict[str, dict] = {}
     for r in records:
         sector = r.naics_sector or "Unknown"
         if sector not in sector_counts:
@@ -348,7 +376,7 @@ def portfolio_concentration(
     }
 
 
-def _serialize(r):
+def _serialize(r) -> dict:
     return {
         "id": r.id,
         "business_name": r.business_name,

@@ -11,8 +11,7 @@ from sqlalchemy import (
     create_engine, Column, String, Float, Boolean,
     DateTime, Text, Integer, ForeignKey
 )
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
 import uuid
 

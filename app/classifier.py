@@ -5,10 +5,12 @@
 # every classification to the database for audit trail.
 
 import re
+import uuid
 from app.confidence import (
     score_keyword_match, build_reasoning,
     needs_human_review, CONFIRMED_SCORE
 )
+from app.database import Classification
 
 NAICS_MAPPINGS = {
 
@@ -270,9 +272,6 @@ def classify_business(business_name, address=None, customer_id=None, batch_id=No
 
 def _persist(result, customer_id, db):
     """Writes a classification result to the database."""
-    from app.database import Classification
-    import uuid
-
     record = Classification(
         id=str(uuid.uuid4()),
         customer_id=customer_id,

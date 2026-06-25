@@ -45,7 +45,7 @@ try:
         st.sidebar.success("API connected")
     else:
         st.sidebar.error("API error")
-except:
+except Exception:
     st.sidebar.error("Cannot reach API — is uvicorn running?")
 
 st.sidebar.divider()
@@ -55,9 +55,41 @@ st.sidebar.caption("Built for Louisiana community banks, credit unions, and insu
 # ── HELPERS ───────────────────────────────────────────────────
 
 def confidence_color(tier):
-    """Returns a colored badge for confidence tier."""
-    colors = {"high": "🟢", "medium": "🟡", "low": "🔴", "unclassified": "⚫"}
-    return colors.get(tier, "⚫")
+    palette = {"high": "🟢", "medium": "🟡", "low": "🔴", "unclassified": "⚫"}
+    return palette.get(tier, "⚫")
+
+
+def render_export_buttons(classification_id: str, key_prefix: str):
+    """Render PDF and Excel download buttons for a classification's audit trail."""
+    col1, col2 = st.columns(2)
+    with col1:
+        resp = requests.get(
+            f"{API_URL}/audit/{classification_id}/export",
+            headers={k: v for k, v in headers.items() if k != "Content-Type"},
+            params={"format": "pdf"},
+        )
+        if resp.status_code == 200:
+            st.download_button(
+                "Download PDF",
+                data=resp.content,
+                file_name=f"audit_{classification_id[:8]}.pdf",
+                mime="application/pdf",
+                key=f"{key_prefix}_pdf_{classification_id}",
+            )
+    with col2:
+        resp = requests.get(
+            f"{API_URL}/audit/{classification_id}/export",
+            headers={k: v for k, v in headers.items() if k != "Content-Type"},
+            params={"format": "excel"},
+        )
+        if resp.status_code == 200:
+            st.download_button(
+                "Download Excel",
+                data=resp.content,
+                file_name=f"audit_{classification_id[:8]}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"{key_prefix}_xl_{classification_id}",
+            )
 
 def classify_one(business_name, address):
     """Calls POST /classify and returns the result dict."""
@@ -106,11 +138,12 @@ def get_portfolio():
 
 # ── TABS ──────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 Classify",
     "📂 Batch Upload",
     "📋 Review Queue",
-    "📊 Portfolio"
+    "📊 Portfolio",
+    "🗂️ History"
 ])
 
 
@@ -326,6 +359,10 @@ with tab3:
                             else:
                                 st.error("Error submitting correction.")
 
+                st.divider()
+                st.markdown("**Export audit report:**")
+                render_export_buttons(item["id"], key_prefix="rq")
+
 
 # ══════════════════════════════════════════════════════════════
 # TAB 4 — PORTFOLIO
@@ -372,3 +409,163 @@ with tab4:
                 st.markdown(f"**Businesses:** {', '.join(s['businesses'])}")
                 if s.get("concentration_warning"):
                     st.warning(f"This sector exceeds the 20% concentration threshold. Consider diversifying or reviewing your exposure.")
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 5 — HISTORY
+# Full searchable, filterable classification log
+# ══════════════════════════════════════════════════════════════
+
+with tab5:
+    st.header("Classification History")
+    st.caption("Browse and search all past classifications. Export to CSV for reporting or examiner requests.")
+
+    # ── FILTERS ───────────────────────────────────────────────
+    with st.expander("Filters", expanded=True):
+        f1, f2, f3, f4, f5 = st.columns(5)
+        with f1:
+            search_query = st.text_input("Search business name", placeholder="e.g. Gulf Coast")
+        with f2:
+            tier_filter = st.selectbox(
+                "Confidence tier",
+                ["All", "high", "medium", "low", "unclassified"]
+            )
+        with f3:
+            confirmed_filter = st.selectbox(
+                "Status",
+                ["All", "Confirmed", "Unconfirmed"]
+            )
+        with f4:
+            review_filter = st.selectbox(
+                "Review flag",
+                ["All", "Needs review", "Reviewed"]
+            )
+        with f5:
+            limit = st.selectbox("Max results", [50, 100, 250, 500], index=1)
+
+    if st.button("Search", type="primary"):
+        st.session_state["history_search_triggered"] = True
+
+    # Run query on load and when search button is pressed
+    params = {"limit": limit}
+    if search_query:
+        params["search"] = search_query
+    if tier_filter != "All":
+        params["confidence_tier"] = tier_filter
+    if confirmed_filter == "Confirmed":
+        params["confirmed"] = "true"
+    elif confirmed_filter == "Unconfirmed":
+        params["confirmed"] = "false"
+    if review_filter == "Needs review":
+        params["needs_review"] = "true"
+    elif review_filter == "Reviewed":
+        params["needs_review"] = "false"
+
+    r = requests.get(f"{API_URL}/history", headers=headers, params=params)
+    hist = r.json()
+    items = hist.get("results", [])
+
+    # ── SUMMARY ROW ──────────────────────────────────────────
+    st.divider()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Records returned", len(items))
+    confirmed_count = sum(1 for i in items if i.get("confirmed"))
+    m2.metric("Confirmed", confirmed_count)
+    review_count = sum(1 for i in items if i.get("needs_review"))
+    m3.metric("Needs review", review_count)
+    high_conf = sum(1 for i in items if i.get("confidence_tier") == "high")
+    m4.metric("High confidence", high_conf)
+
+    st.divider()
+
+    if not items:
+        st.info("No records found. Try adjusting your filters.")
+    else:
+        # ── TABLE ─────────────────────────────────────────────
+        rows = []
+        for item in items:
+            rows.append({
+                "Business": item.get("business_name", ""),
+                "NAICS Code": item.get("naics_code") or "—",
+                "Description": item.get("naics_description") or "—",
+                "Sector": item.get("naics_sector") or "—",
+                "Parish": item.get("parish") or "—",
+                "Score": item.get("confidence_score", 0),
+                "Tier": item.get("confidence_tier", "—"),
+                "Confirmed": "✅" if item.get("confirmed") else "—",
+                "Needs Review": "⚠️" if item.get("needs_review") else "—",
+                "Conflict": "⚠️" if item.get("conflict_detected") else "—",
+                "Method": item.get("method", "—"),
+                "Date": (item.get("created_at") or "")[:10],
+                "ID": item.get("id", ""),
+            })
+
+        df = pd.DataFrame(rows)
+
+        st.dataframe(
+            df.drop(columns=["ID"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ── EXPORT ────────────────────────────────────────────
+        csv = df.to_csv(index=False)
+        st.download_button(
+            "Download CSV",
+            data=csv,
+            file_name="pelican_risk_history.csv",
+            mime="text/csv"
+        )
+
+        # ── RECORD DETAIL ─────────────────────────────────────
+        st.divider()
+        st.markdown("**Audit detail** — select a record to see full reasoning and corrections:")
+        selected_name = st.selectbox(
+            "Select a business",
+            options=["—"] + [i.get("business_name", "") for i in items],
+            index=0
+        )
+
+        if selected_name != "—":
+            selected = next((i for i in items if i.get("business_name") == selected_name), None)
+            if selected:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("NAICS Code", selected.get("naics_code") or "Unclassified")
+                c2.metric("Confidence Score", selected.get("confidence_score", 0))
+                c3.metric("Tier", f"{confidence_color(selected.get('confidence_tier', ''))} {(selected.get('confidence_tier') or '').upper()}")
+
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown(f"**Industry:** {selected.get('naics_description') or '—'}")
+                    st.markdown(f"**Sector:** {selected.get('naics_sector') or '—'}")
+                    st.markdown(f"**Parish:** {selected.get('parish') or '—'}")
+                    st.markdown(f"**Address:** {selected.get('address') or '—'}")
+                with col_b:
+                    st.markdown(f"**Method:** {selected.get('method') or '—'}")
+                    st.markdown(f"**Matched keyword:** `{selected.get('match_keyword') or 'none'}`")
+                    st.markdown(f"**Confirmed by:** {selected.get('confirmed_by') or '—'}")
+                    st.markdown(f"**Date:** {(selected.get('created_at') or '')[:19].replace('T', ' ')}")
+
+                st.markdown("**Audit Reasoning:**")
+                st.info(selected.get("reasoning") or "No reasoning recorded.")
+
+                # Fetch full audit trail from API
+                audit_r = requests.get(
+                    f"{API_URL}/audit/{selected['id']}",
+                    headers=headers
+                )
+                if audit_r.status_code == 200:
+                    audit = audit_r.json()
+                    corrections = audit.get("correction_history", [])
+                    if corrections:
+                        st.markdown(f"**Correction history ({len(corrections)} corrections):**")
+                        for c in corrections:
+                            st.markdown(
+                                f"- `{c['original_code']}` → `{c['corrected_to']}` "
+                                f"by **{c['corrected_by']}** on {(c.get('corrected_at') or '')[:10]}"
+                                + (f" — *{c['reason']}*" if c.get('reason') else "")
+                            )
+
+                st.divider()
+                st.markdown("**Export audit report:**")
+                render_export_buttons(selected["id"], key_prefix="hist")

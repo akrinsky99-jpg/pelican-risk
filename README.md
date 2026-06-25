@@ -118,24 +118,16 @@ Scores are calculated based on keyword specificity, multi-keyword agreement, and
 
 ## Project Structure
 pelican-risk/
-
 ├── app/
-
-│   ├── init.py
-
-│   ├── classifier.py     # Classification engine + NAICS keyword mappings
-
-│   ├── confidence.py     # Real confidence scoring (0.0–1.0)
-
-│   ├── database.py       # SQLAlchemy models: customers, classifications, corrections, batch_jobs
-
-│   └── main.py           # FastAPI endpoints
-
-├── frontend.py           # Streamlit UI
-
-├── requirements.txt
-
-└── README.md
+│   ├── __init__.py
+│   ├── classifier.py
+│   ├── confidence.py
+│   ├── database.py
+│   └── main.py
+├── frontend.py
+├── pelican_risk.db
+├── README.md
+└── requirements.txt
 
 ---
 
